@@ -378,8 +378,8 @@ pub async fn get_stundenplan(
         .results
         .into_iter()
         .filter_map(|ev| {
-            let start = odata_local_date_to_epoch_ms(&ev.start)?;
-            let end = odata_local_date_to_epoch_ms(&ev.end)?;
+            let start = odata_date_to_epoch_ms(&ev.start)?;
+            let end = odata_date_to_epoch_ms(&ev.end)?;
             Some(StundenplanItem::from_event(ev, start, end))
         })
         .collect();
@@ -402,12 +402,9 @@ pub async fn get_stundenplan(
     Ok(Json(stundenplan))
 }
 
-/// SAP sends `/Date(ms)/` where the ms are the *local* Berlin wall clock time as if it were UTC
-fn odata_local_date_to_epoch_ms(raw: &str) -> Option<i64> {
-    let ms: i64 = raw.strip_prefix("/Date(")?.strip_suffix(")/")?.parse().ok()?;
-    let naive = chrono::DateTime::from_timestamp_millis(ms)?.naive_utc();
-    let local = naive.and_local_timezone(chrono_tz::Europe::Berlin).earliest()?;
-    Some(local.timestamp_millis())
+/// SAP sends `/Date(ms)/` with ms being a real UTC epoch
+fn odata_date_to_epoch_ms(raw: &str) -> Option<i64> {
+    raw.strip_prefix("/Date(")?.strip_suffix(")/")?.parse().ok()
 }
 
 fn string_to_rgb(input: &str) -> String {
