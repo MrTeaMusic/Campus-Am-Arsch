@@ -171,6 +171,8 @@ pub struct TimetableEvent {
     #[serde(default)]
     pub room: String,
     #[serde(default)]
+    pub cohorts: String,
+    #[serde(default)]
     pub remarks: String,
     #[serde(default)]
     pub otype: String,
@@ -544,4 +546,20 @@ pub fn build_grades(rows: Vec<CourseResult>) -> Vec<CampusDualGrade> {
             }
         })
         .collect()
+}
+
+/// ZBA_EXAM_REGISTRATION_SRV/PeriodSet
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ExamPeriod {
+    pub peryr: String,
+    pub perid: String,
+}
+
+/// ZBA_EXAM_REGISTRATION_SRV/ExamSet. "B" = "Angebot gebucht" (an exam offer is booked)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ExamRegistration {
+    #[serde(default)]
+    pub registration_state: String,
 }

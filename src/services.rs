@@ -16,7 +16,7 @@ use crate::{
         build_grades, CampusDualGrade, CampusDualSignupOption, CampusDualVerfahrenOption, CampusLoginData,
         CampusReminders, CourseResult, CampusTimeline, CampusTimelineEvent, CdAuthData, CdExamDetails,
         CdExamStats, CdGradeStatEntry, ExamRegistrationMetadata, ExportTimelineEvent,
-        ExportTimelineEvents, GradeStatsAllStudents, LoginResponse, ODataList, ResponseError,
+        ExportTimelineEvents, GradeStatsAllStudents, LoginResponse, ExamPeriod, ExamRegistration, ODataList, ResponseError,
         StundenplanItem, SubGradeMetadata, TimetableEvent,
     },
 };
@@ -293,7 +293,8 @@ async fn odata_get<T: serde::de::DeserializeOwned>(
     Ok(resp.error_for_status()?.json().await?)
 }
 
-/// Derived from the module results: V2 has no separate statistics endpoint
+/// Derived from the module results (V2 has no separate statistics endpoint). "Pending" are the
+/// exams with a booked offer in the exam registration, which keeps listing past periods
 pub async fn get_examstats(
     Extension(cd_authdata): Extension<CdAuthData>,
 ) -> Result<Json<CdExamStats>, ResponseError> {
@@ -302,16 +303,20 @@ pub async fn get_examstats(
     let results: ODataList<CourseResult> =
         odata_get(&client, "ZPIQ_COURSE_RESULTS_SRV/CourseResultSet").await?;
 
-    let mut seen = std::collections::HashSet::new();
-    let (mut successful, mut unsuccessful, mut booked) = (0, 0, 0);
-    for r in results.d.results.iter().filter(|r| !r.is_exam() && seen.insert(r.key())) {
-        match r.status_code.as_str() {
-            "02" => successful += 1,
-            "03" => unsuccessful += 1,
-            "01" => booked += 1,
-            _ => {}
+    // same module/exam grouping as the grades, so both always agree
+    let grades = build_grades(results.d.results);
+    let successful = grades.iter().filter(|g| g.total_passed == Some(true)).count() as i64;
+    let unsuccessful = grades.iter().filter(|g| g.total_passed == Some(false)).count() as i64;
+    let booked_modules = grades.iter().filter(|g| g.total_passed.is_none()).count() as i64;
+
+    // exams the student has an offer booked for; falls back to the open modules if unavailable
+    let booked = match count_booked_exam_offers(&client).await {
+        Ok(n) => n,
+        Err(e) => {
+            log::warn!("exam registration unavailable: {}", e.message);
+            booked_modules
         }
-    }
+    };
 
     Ok(Json(CdExamStats {
         total: successful + unsuccessful + booked,
@@ -322,6 +327,28 @@ pub async fn get_examstats(
         finished: successful + unsuccessful,
         ronmodus: 0,
     }))
+}
+
+async fn count_booked_exam_offers(
+    client: &reqwest_middleware::ClientWithMiddleware,
+) -> Result<i64, ResponseError> {
+    let periods: ODataList<ExamPeriod> =
+        odata_get(client, "ZBA_EXAM_REGISTRATION_SRV/PeriodSet?sap-client=100&$skip=0&$top=100")
+            .await?;
+
+    let mut booked = 0;
+    for p in periods.d.results {
+        let exams: ODataList<ExamRegistration> = odata_get(
+            client,
+            &format!(
+                "ZBA_EXAM_REGISTRATION_SRV/ExamSet?sap-client=100&$skip=0&$top=100&$filter=Perid%20eq%20%27{}%27%20and%20Peryr%20eq%20%27{}%27",
+                p.perid, p.peryr
+            ),
+        )
+        .await?;
+        booked += exams.d.results.iter().filter(|e| e.registration_state == "B").count() as i64;
+    }
+    Ok(booked)
 }
 
 pub async fn get_stundenplan(

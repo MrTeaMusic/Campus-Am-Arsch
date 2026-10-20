@@ -52,9 +52,9 @@ pub async fn cdlogin_get_jcookie_and_meta(
     let cookie_store = Arc::new(CookieStoreMutex::new(CookieStore::new()));
     let client = build_login_client(cookie_store.clone())?;
 
-    saml_login(&client, &login_data).await?;
+    let portal_html = saml_login(&client, &login_data).await?;
 
-    let user_basic_info = get_userinfo(&client, &display_user).await?;
+    let user_basic_info = get_userinfo(&client, &display_user, &portal_html).await?;
 
     let cd_auth_data = CdAuthData {
         cookie: serialize_cookie_store(&cookie_store)?,
@@ -67,7 +67,7 @@ pub async fn cdlogin_get_jcookie_and_meta(
 }
 
 /// SP-initiated SAML flow: campus-dual -> idp.dhsn.de (credentials) -> campus-dual ACS -> portal
-async fn saml_login(client: &Client, login_data: &CampusLoginData) -> Result<()> {
+async fn saml_login(client: &Client, login_data: &CampusLoginData) -> Result<String> {
     // 1: portal redirects to the IdP login page
     let resp = client
         .get(format!("{CD_BASE}/portal"))
@@ -127,17 +127,22 @@ async fn saml_login(client: &Client, login_data: &CampusLoginData) -> Result<()>
         let doc = Html::parse_document(&html);
         parse_form(&doc, &url, "form")
     };
-    if let Some((portal_url, portal_fields)) = portal {
-        client
-            .post(portal_url)
-            .form(&portal_fields)
-            .send()
-            .await?
-            .error_for_status()?;
-    }
+    let portal_html = match portal {
+        Some((portal_url, portal_fields)) => {
+            client
+                .post(portal_url)
+                .form(&portal_fields)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?
+        }
+        None => html,
+    };
 
     log::info!("campus_login success");
-    Ok(())
+    Ok(portal_html)
 }
 
 fn set_field(fields: &mut Vec<(String, String)>, name: &str, value: &str) {
@@ -190,20 +195,74 @@ pub fn deserialize_cookie_store(json: &str) -> Result<CookieStore> {
         .map_err(|e| anyhow::anyhow!("cookie store deserialisation failed: {e}"))
 }
 
-async fn get_userinfo(client: &Client, username: &str) -> Result<UserBasicInfo> {
+/// Undoes the HTML entity escaping SAP applies to the serverSideConfig meta tag (`&#x22;` etc.)
+fn decode_numeric_entities(html: &str) -> String {
+    lazy_static::lazy_static! {
+        static ref ENTITY: regex::Regex = regex::Regex::new(r"&#x([0-9a-fA-F]+);").unwrap();
+    }
+    ENTITY
+        .replace_all(html, |c: &regex::Captures| {
+            u32::from_str_radix(&c[1], 16)
+                .ok()
+                .and_then(char::from_u32)
+                .map(String::from)
+                .unwrap_or_default()
+        })
+        .into_owned()
+}
+
+/// Reads a JSON string value like `"firstName":"Max"` out of free text
+fn json_string_field(text: &str, key: &str) -> Option<String> {
+    let re = regex::Regex::new(&format!(r#""{key}"\s*:\s*("(?:[^"\\]|\\.)*")"#)).ok()?;
+    serde_json::from_str(re.captures(text)?.get(1)?.as_str()).ok()
+}
+
+/// Splits "Informatik 2024 Gr. 1 (5CS24-1)" into group "5CS24-1" and name "Informatik 2024 Gr. 1"
+fn split_cohort(cohort: &str) -> Option<(String, String)> {
+    let cohort = cohort.trim();
+    let open = cohort.rfind('(')?;
+    let group = cohort[open + 1..].strip_suffix(')')?.trim();
+    let name = cohort[..open].trim();
+    (!group.is_empty()).then(|| (group.to_string(), name.to_string()))
+}
+
+async fn get_userinfo(client: &Client, username: &str, portal_html: &str) -> Result<UserBasicInfo> {
+    let mut info = UserBasicInfo {
+        user: username.to_string(),
+        ..Default::default()
+    };
+
+    let config = decode_numeric_entities(portal_html);
+    info.first_name = json_string_field(&config, "firstName").unwrap_or_default();
+    info.last_name = json_string_field(&config, "lastName").unwrap_or_default();
+
+    // the seminar group is the most common cohort in the timetable
     let resp = client
-        .get(format!("{CD_BASE}/sap/opu/odata/sap/ZPIQ_COURSE_RESULTS_SRV/ProgramOfStudySet"))
+        .get(format!(
+            "{CD_BASE}/sap/opu/odata/sap/ZCM_EM_STUDENT_TIMETABLE_SRV/EventListSet?sap-client=100&$skip=0&$top=200"
+        ))
         .header("Accept", "application/json")
         .send()
         .await?;
     if !resp.status().is_success() {
         bail!("CD user info: HTTP {}", resp.status());
     }
-    // TODO: names/seminar group still need a source in the new CampusDual
-    Ok(UserBasicInfo {
-        user: username.to_string(),
-        ..Default::default()
-    })
+    let events: crate::types::ODataList<crate::types::TimetableEvent> = resp.json().await?;
+
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for ev in &events.d.results {
+        if !ev.cohorts.trim().is_empty() {
+            *counts.entry(ev.cohorts.clone()).or_default() += 1;
+        }
+    }
+    if let Some((cohort, _)) = counts.into_iter().max_by_key(|(_, n)| *n) {
+        if let Some((group, name)) = split_cohort(&cohort) {
+            info.seminar_group = group;
+            info.seminar_name = name;
+        }
+    }
+
+    Ok(info)
 }
 
 #[cfg(test)]
@@ -217,6 +276,19 @@ mod tests {
         assert_eq!(normalize_username("s5002851"), "s5002851");
         assert_eq!(normalize_username("S5002851"), "S5002851");
         assert_eq!(normalize_username(""), "");
+    }
+
+    #[test]
+    fn parses_portal_name_and_cohort() {
+        let html = "&#x7b;&#x22;firstName&#x22;&#x3a;&#x22;Max&#x22;,&#x22;lastName&#x22;&#x3a;&#x22;M\\u00fcller&#x22;&#x7d;";
+        let decoded = super::decode_numeric_entities(html);
+        assert_eq!(super::json_string_field(&decoded, "firstName").as_deref(), Some("Max"));
+        assert_eq!(super::json_string_field(&decoded, "lastName").as_deref(), Some("Müller"));
+        assert_eq!(
+            super::split_cohort("Informatik 2024 Gr. 1 (5CS24-1)"),
+            Some(("5CS24-1".to_string(), "Informatik 2024 Gr. 1".to_string()))
+        );
+        assert_eq!(super::split_cohort("keine Klammer"), None);
     }
 }
 
@@ -255,7 +327,13 @@ mod live_tests {
             login.password.len()
         );
         let (auth, info) = cdlogin_get_jcookie_and_meta(login).await.unwrap();
-        println!("login ok, user info filled: {}", !info.user.is_empty());
+        println!(
+            "login ok. name lengths: first={} last={}, seminar_group={:?}, seminar_name={:?}",
+            info.first_name.len(),
+            info.last_name.len(),
+            info.seminar_group,
+            info.seminar_name
+        );
         println!("cookie store json bytes: {}", auth.cookie.len());
         let cookies: Vec<Value> = serde_json::from_str(&auth.cookie).unwrap();
         for c in &cookies {
@@ -371,7 +449,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore]
     async fn live_services() {
-        use crate::services::{check_revive_session, get_ects, get_fachsem, get_grades, get_stundenplan};
+        use crate::services::{check_revive_session, get_ects, get_examstats, get_fachsem, get_grades, get_stundenplan};
         use axum::Extension;
         init_cert();
         let login = CampusLoginData {
@@ -400,6 +478,10 @@ mod live_tests {
         match get_ects(Extension(auth.clone())).await {
             Ok(v) => println!("ects: {v}"),
             Err(e) => println!("ects FAILED: {} {}", e.status_code, e.message),
+        }
+        match get_examstats(Extension(auth.clone())).await {
+            Ok(axum::Json(st)) => println!("examstats: {st:?}"),
+            Err(e) => println!("examstats FAILED: {} {}", e.status_code, e.message),
         }
         match get_fachsem(Extension(auth.clone())).await {
             Ok(v) => println!("fachsem: {v}"),
@@ -526,5 +608,53 @@ mod live_tests {
         println!("distinct ModuleGroup values: {}, largest group {}", by_group.len(), by_group.values().max().unwrap_or(&0));
         let by_comp: std::collections::BTreeMap<String, usize> = rows.iter().fold(Default::default(), |mut acc, r| { *acc.entry(d(r, "CompositeModules")).or_default() += 1; acc });
         println!("distinct CompositeModules values: {} (group sizes {:?})", by_comp.len(), by_comp.values().collect::<Vec<_>>());
+    }
+
+    /// Lists the exam registration periods and exams. Prints counts, field names and enums only.
+    #[tokio::test]
+    #[ignore]
+    async fn live_examreg() {
+        init_cert();
+        let login = CampusLoginData {
+            username: std::env::var("CD_USER").unwrap(),
+            password: std::env::var("CD_PASS").unwrap(),
+        };
+        let (auth, _) = cdlogin_get_jcookie_and_meta(login).await.unwrap();
+        let client = get_client_with_cd_cookie(false, auth.cookie).unwrap();
+        let get = |path: String| {
+            let client = client.clone();
+            async move {
+                let r = client
+                    .get(format!("{CD_BASE}/sap/opu/odata/sap/ZBA_EXAM_REGISTRATION_SRV/{path}"))
+                    .header("Accept", "application/json")
+                    .send()
+                    .await
+                    .unwrap();
+                let status = r.status();
+                (status, r.json::<Value>().await.unwrap_or(Value::Null))
+            }
+        };
+
+        let (st, periods) = get("PeriodSet?sap-client=100&$skip=0&$top=100".into()).await;
+        println!("PeriodSet -> {st}");
+        let rows = periods["d"]["results"].as_array().cloned().unwrap_or_default();
+        if let Some(r) = rows.first() {
+            let keys: Vec<_> = r.as_object().unwrap().keys().filter(|k| *k != "__metadata").collect();
+            println!("period fields: {keys:?}");
+        }
+        for p in &rows {
+            let (peryr, perid) = (p["Peryr"].as_str().unwrap_or(""), p["Perid"].as_str().unwrap_or(""));
+            let q = format!("ExamSet?sap-client=100&$skip=0&$top=100&$filter=Perid%20eq%20%27{perid}%27%20and%20Peryr%20eq%20%27{peryr}%27");
+            let (st, v) = get(q).await;
+            let exams = v["d"]["results"].as_array().cloned().unwrap_or_default();
+            println!("period {peryr}/{perid} (current flag {:?}): ExamSet -> {st}, {} exams", p["Current"], exams.len());
+            if let Some(e) = exams.first() {
+                let o = e.as_object().unwrap();
+                println!("  exam fields: {:?}", o.keys().filter(|k| *k != "__metadata").collect::<Vec<_>>());
+                for (k, x) in o.iter().filter(|(k, _)| *k != "__metadata") {
+                    if let Some(t) = x.as_str() { if t.len() <= 3 { println!("  {k} = {t:?} (first exam)"); } } else if !x.is_object() { println!("  {k} = {x} (first exam)"); }
+                }
+            }
+        }
     }
 }
