@@ -1,3 +1,7 @@
+> **Fork mit CampusDual-V2-Unterstützung.** Dieses Repo basiert auf [fnschmidt/campus-api](https://github.com/fnschmidt/campus-api) (GPL-3.0) und nutzt den neuen SAML-Login sowie die OData-Schnittstellen von CampusDual V2.
+> Funktioniert: Login, Stundenplan, Noten, ECTS, Fachsemester. Noch nicht portiert (Antwort `501`): Prüfungsanmeldung, Notenstatistik, Prüfungsstatistik, Reminders, Timeline.
+> Live-Tests: `CD_USER=… CD_PASS=… cargo test live_services -- --ignored --nocapture`
+
 # 🦀 CampusDual API 🦀
 A (stateless) REST API which provides the link between NetWeaver-based CampusDual and a remotely reasonable frontend.
 Miraculously already far more reliable and performant than the very origin it scrapes all the data from.
