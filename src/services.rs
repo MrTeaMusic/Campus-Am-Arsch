@@ -300,25 +300,35 @@ async fn odata_get<T: serde::de::DeserializeOwned>(
     Ok(resp.error_for_status()?.json().await?)
 }
 
+/// Derived from the module results: V2 has no separate statistics endpoint
 pub async fn get_examstats(
     Extension(cd_authdata): Extension<CdAuthData>,
 ) -> Result<Json<CdExamStats>, ResponseError> {
-    let client = get_client_default(true)?;
+    let client = get_client_with_cd_cookie(true, cd_authdata.cookie)?;
 
-    let user = cd_authdata.user;
-    let hash = cd_authdata.hash;
+    let results: ODataList<CourseResult> =
+        odata_get(&client, "ZPIQ_COURSE_RESULTS_SRV/CourseResultSet").await?;
 
-    let resp = client
-        .get(format!(
-            "https://selfservice.campus-dual.de/dash/getexamstats?user={user}&hash={hash}"
-        ))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<CdExamStats>()
-        .await?;
+    let mut seen = std::collections::HashSet::new();
+    let (mut successful, mut unsuccessful, mut booked) = (0, 0, 0);
+    for r in results.d.results.iter().filter(|r| seen.insert(r.key())) {
+        match r.status_code.as_str() {
+            "02" => successful += 1,
+            "03" => unsuccessful += 1,
+            "01" => booked += 1,
+            _ => {}
+        }
+    }
 
-    Ok(Json(resp))
+    Ok(Json(CdExamStats {
+        total: successful + unsuccessful + booked,
+        successful,
+        unsuccessful,
+        unassessed: booked,
+        booked,
+        finished: successful + unsuccessful,
+        ronmodus: 0,
+    }))
 }
 
 pub async fn get_stundenplan(

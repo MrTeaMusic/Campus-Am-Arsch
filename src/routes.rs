@@ -73,7 +73,7 @@ pub async fn app() -> Router {
         .route("/get_examverfahren", get(services::not_supported_in_v2))
         .route("/get_ects", get(services::get_ects))
         .route("/get_fachsem", get(services::get_fachsem))
-        .route("/get_examstats", get(services::not_supported_in_v2))
+        .route("/get_examstats", get(services::get_examstats))
         .route("/get_stundenplan", get(services::get_stundenplan))
         .route("/get_reminders", get(services::not_supported_in_v2))
         .route("/get_timeline", get(services::not_supported_in_v2))
