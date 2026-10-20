@@ -1,0 +1,5 @@
+# Holt und erneuert das HTTPS-Zertifikat automatisch (Ports 80 und 443 müssen offen sein)
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy frontend:3000
+}

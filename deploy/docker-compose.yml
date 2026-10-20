@@ -1,0 +1,62 @@
+# Alle drei Dienste werden beim Start direkt aus GitHub gebaut, es braucht keine Registry
+# und keine Zugangsdaten. Start:  docker compose up -d --build
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+
+  frontend:
+    build:
+      context: https://github.com/MrTeaMusic/Campus-Unbloat-Frontend.git#main
+    restart: unless-stopped
+    environment:
+      - CD_API_URL=http://api-campus:8080
+      - MENSA_API_URL=http://api-mensa:9090
+      # hinter einem Reverse Proxy braucht SvelteKit die öffentliche Adresse, sonst werden
+      # Formulare (Login) als Cross-Site-Anfrage abgelehnt
+      - ORIGIN=https://${DOMAIN}
+      - PROTOCOL_HEADER=x-forwarded-proto
+      - HOST_HEADER=x-forwarded-host
+      # Impressum (Pflicht bei einem öffentlichen Angebot)
+      - PUBLIC_IMPRESS_FULLNAME=${IMPRESS_FULLNAME}
+      - PUBLIC_IMPRESS_STRASSE_HAUSNR=${IMPRESS_STRASSE_HAUSNR}
+      - PUBLIC_IMPRESS_PLZ_ORT=${IMPRESS_PLZ_ORT}
+      - PUBLIC_IMPRESS_TELEFON=${IMPRESS_TELEFON}
+      - PUBLIC_IMPRESS_EMAIL=${IMPRESS_EMAIL}
+    depends_on:
+      - api-campus
+      - api-mensa
+
+  api-campus:
+    build:
+      context: https://github.com/MrTeaMusic/Campus-Unbloat.git#main
+    restart: unless-stopped
+    environment:
+      - JWT_SECRET=${JWT_SECRET}
+      - AES_KEY=${AES_KEY}
+      - RUST_LOG=info
+
+  api-mensa:
+    build:
+      context: https://github.com/fnschmidt/mensa-api.git#main
+    restart: unless-stopped
+    environment:
+      - FILTER_OPENMENSA=y
+    volumes:
+      - mensa_data:/app/data
+
+volumes:
+  caddy_data:
+  caddy_config:
+  mensa_data:
