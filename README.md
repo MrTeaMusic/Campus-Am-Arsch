@@ -1,5 +1,6 @@
 > **Fork mit CampusDual-V2-Unterstützung.** Dieses Repo basiert auf [fnschmidt/campus-api](https://github.com/fnschmidt/campus-api) (GPL-3.0) und nutzt den neuen SAML-Login sowie die OData-Schnittstellen von CampusDual V2.
 > Funktioniert: Login, Stundenplan, Noten, ECTS, Fachsemester. Noch nicht portiert (Antwort `501`): Prüfungsanmeldung, Notenstatistik, Prüfungsstatistik, Reminders, Timeline.
+> Frontend dazu: [MrTeaMusic/Campus-Unbloat-Frontend](https://github.com/MrTeaMusic/Campus-Unbloat-Frontend)
 > Live-Tests: `CD_USER=… CD_PASS=… cargo test live_services -- --ignored --nocapture`
 
 # 🦀 CampusDual API 🦀
