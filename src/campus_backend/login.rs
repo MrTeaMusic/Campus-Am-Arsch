@@ -413,10 +413,13 @@ mod live_tests {
                     g.iter().filter(|m| m.total_passed == Some(true)).count(),
                     g.iter().filter(|m| m.total_passed == Some(false)).count(),
                     g.iter().filter(|m| m.total_passed.is_none()).count());
-                if let Some(m) = g.iter().find(|m| !m.subgrades.is_empty()) {
-                    println!("  credits sum={} zero-credit modules={}", g.iter().map(|m| m.credit_points).sum::<i32>(), g.iter().filter(|m| m.credit_points == 0).count());
-                    println!("  sample: credits={} period={:?} grade_len={} subgrades={}", m.credit_points, m.akad_period, m.grade.len(), m.subgrades.len());
-                }
+                let mut hist: std::collections::BTreeMap<&str, usize> = Default::default();
+                for m in &g { *hist.entry(m.grade.as_str()).or_default() += 1; }
+                println!("  module grades: {hist:?}");
+                println!("  credits sum={} subgrades total={}", g.iter().map(|m| m.credit_points).sum::<i32>(), g.iter().map(|m| m.subgrades.len()).sum::<usize>());
+                let mut sub: std::collections::BTreeMap<&str, usize> = Default::default();
+                for m in &g { for x in &m.subgrades { *sub.entry(x.grade.as_str()).or_default() += 1; } }
+                println!("  subgrade grades: {sub:?}");
             }
             Err(e) => println!("grades FAILED: {} {}", e.status_code, e.message),
         }
@@ -478,5 +481,50 @@ mod live_tests {
         for (k, n) in by {
             println!("{n:>3} x {k}");
         }
+    }
+
+    /// Finds how exam rows ("P ...") relate to module rows. Prints match counts only.
+    #[tokio::test]
+    #[ignore]
+    async fn live_modules() {
+        init_cert();
+        let login = CampusLoginData {
+            username: std::env::var("CD_USER").unwrap(),
+            password: std::env::var("CD_PASS").unwrap(),
+        };
+        let (auth, _) = cdlogin_get_jcookie_and_meta(login).await.unwrap();
+        let client = get_client_with_cd_cookie(false, auth.cookie).unwrap();
+        let v: Value = client
+            .get(format!("{CD_BASE}/sap/opu/odata/sap/ZPIQ_COURSE_RESULTS_SRV/CourseResultSet?$expand=CourseDetails"))
+            .header("Accept", "application/json")
+            .send().await.unwrap().json().await.unwrap();
+        let rows = v["d"]["results"].as_array().unwrap();
+        let s = |r: &Value, k: &str| r[k].as_str().unwrap_or("").to_string();
+        let d = |r: &Value, k: &str| r["CourseDetails"][k].as_str().unwrap_or("").to_string();
+
+        println!("sample CourseDetails keys: {:?}", rows[0]["CourseDetails"].as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()));
+        let (mut p_rows, mut with_comp, mut comp_is_course_name, mut comp_is_course_id, mut comp_is_num) = (0, 0, 0, 0, 0);
+        let names: std::collections::HashSet<_> = rows.iter().map(|r| s(r, "CourseName")).collect();
+        let ids: std::collections::HashSet<_> = rows.iter().map(|r| s(r, "CourseID")).collect();
+        let nums: std::collections::HashSet<_> = rows.iter().map(|r| d(r, "CourseNum")).collect();
+        for r in rows.iter().filter(|r| s(r, "CourseName").starts_with("P ")) {
+            p_rows += 1;
+            let comp = d(r, "CompositeModules");
+            if !comp.is_empty() { with_comp += 1; }
+            if names.contains(&comp) { comp_is_course_name += 1; }
+            if ids.contains(&comp) { comp_is_course_id += 1; }
+            if nums.contains(&comp) { comp_is_num += 1; }
+        }
+        println!("P rows={p_rows} with CompositeModules={with_comp} == some CourseName={comp_is_course_name} == some CourseID={comp_is_course_id} == some CourseNum={comp_is_num}");
+        // does CompositeModules on a module row list its exams?
+        let m = rows.iter().find(|r| !s(r, "CourseName").starts_with("P ") && s(r, "Gradescale") == "GESA");
+        if let Some(m) = m {
+            println!("module row: CompositeModules len {} contains 'P ' = {} ModuleGroup len {} Module len {}",
+                d(m, "CompositeModules").len(), d(m, "CompositeModules").contains("P "), d(m, "ModuleGroup").len(), d(m, "Module").len());
+        }
+        let by_group: std::collections::BTreeMap<String, usize> = rows.iter().fold(Default::default(), |mut acc, r| { *acc.entry(d(r, "ModuleGroup")).or_default() += 1; acc });
+        println!("distinct ModuleGroup values: {}, largest group {}", by_group.len(), by_group.values().max().unwrap_or(&0));
+        let by_comp: std::collections::BTreeMap<String, usize> = rows.iter().fold(Default::default(), |mut acc, r| { *acc.entry(d(r, "CompositeModules")).or_default() += 1; acc });
+        println!("distinct CompositeModules values: {} (group sizes {:?})", by_comp.len(), by_comp.values().collect::<Vec<_>>());
     }
 }

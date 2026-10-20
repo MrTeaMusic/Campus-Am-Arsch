@@ -415,7 +415,8 @@ pub struct ODataResults<T> {
     pub results: Vec<T>,
 }
 
-/// ZPIQ_COURSE_RESULTS_SRV/CourseResultSet (one module incl. expanded DetailedAppraisals)
+/// ZPIQ_COURSE_RESULTS_SRV/CourseResultSet. A module and its exam are separate rows that share
+/// the `ModuleGroup` of their expanded `CourseDetails`; exam rows are named "P <module> (<type>)"
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CourseResult {
@@ -431,8 +432,12 @@ pub struct CourseResult {
     pub program_type: String,
     #[serde(default)]
     pub course_name: String,
+    /// Internal SAP scale value (e.g. 49000.00), not the grade
     #[serde(default)]
     pub grade_value: String,
+    /// Display grade, e.g. "3,3"
+    #[serde(default)]
+    pub results: String,
     #[serde(default)]
     pub status_code: String,
     #[serde(default)]
@@ -445,63 +450,98 @@ pub struct CourseResult {
     pub zz_assessment_date: String,
     #[serde(default)]
     pub zz_procedure_reason: String,
-    /// A list when requested via $expand, otherwise a `__deferred` link object
+    /// An object when requested via $expand, otherwise a `__deferred` link
     #[serde(default)]
-    pub detailed_appraisals: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct Appraisal {
-    #[serde(default)]
-    pub appraisal_type: String,
-    #[serde(default)]
-    pub student_mark: String,
+    pub course_details: serde_json::Value,
 }
 
 impl CourseResult {
-    /// Identity of a result row, used to drop rows the paged service repeats
+    /// Identity of a result row, used to drop rows the service repeats
     pub fn key(&self) -> String {
         format!(
             "{}|{}|{}|{}|{}",
             self.course_id, self.acad_year_id, self.session_id, self.program_of_study_id, self.program_type
         )
     }
-}
 
-impl From<CourseResult> for CampusDualGrade {
-    fn from(c: CourseResult) -> Self {
+    /// Exams ("Prüfungsleistungen") are listed as "P <module> (<type>)"
+    pub fn is_exam(&self) -> bool {
+        self.course_name.starts_with("P ")
+    }
+
+    fn module_group(&self) -> String {
+        self.course_details["ModuleGroup"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.course_id.clone())
+    }
+
+    fn grade(&self) -> String {
+        if self.results.is_empty() { "?".to_string() } else { self.results.clone() }
+    }
+
+    fn passed(&self) -> Option<bool> {
         // 01 = booked, 02 = passed, 03 = failed
-        let total_passed = match c.status_code.as_str() {
+        match self.status_code.as_str() {
             "02" => Some(true),
             "03" => Some(false),
             _ => None,
-        };
-        let wiederholung = Some(c.zz_procedure_reason.clone()).filter(|r| !r.is_empty());
-
-        let subgrades = serde_json::from_value::<ODataResults<Appraisal>>(c.detailed_appraisals)
-            .map(|a| a.results)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| CampusDualSubGrade {
-                name: a.appraisal_type,
-                grade: a.student_mark,
-                passed: total_passed,
-                beurteilung: c.zz_assessment_date.clone(),
-                bekanntgabe: c.zz_announcement_date.clone(),
-                wiederholung: wiederholung.clone(),
-                akad_period: c.session.clone(),
-                internal_metadata: None,
-            })
-            .collect();
-
-        CampusDualGrade {
-            name: c.course_name,
-            grade: if c.grade_value.is_empty() { "?".to_string() } else { c.grade_value },
-            total_passed,
-            credit_points: c.credits.trim().replace(',', ".").parse::<f64>().map(|f| f as i32).unwrap_or_default(),
-            akad_period: c.session,
-            subgrades,
         }
     }
+}
+
+/// Turns the flat result rows into modules with their exams as subgrades
+pub fn build_grades(rows: Vec<CourseResult>) -> Vec<CampusDualGrade> {
+    let mut seen = std::collections::HashSet::new();
+    let mut groups: Vec<(String, Vec<CourseResult>)> = Vec::new();
+    for row in rows.into_iter().filter(|r| seen.insert(r.key())) {
+        let group = row.module_group();
+        match groups.iter_mut().find(|(g, _)| *g == group) {
+            Some((_, members)) => members.push(row),
+            None => groups.push((group, vec![row])),
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(_, members)| {
+            let (exams, mut modules): (Vec<_>, Vec<_>) = members.into_iter().partition(|r| r.is_exam());
+            // a group without a module row (only exams) is shown as the module itself
+            let (module, exams) = if modules.is_empty() {
+                let mut exams = exams;
+                (exams.remove(0), exams)
+            } else {
+                (modules.remove(0), exams)
+            };
+
+            let subgrades: Vec<CampusDualSubGrade> = exams
+                .iter()
+                .map(|e| CampusDualSubGrade {
+                    name: e.course_name.clone(),
+                    grade: e.grade(),
+                    passed: e.passed(),
+                    beurteilung: e.zz_assessment_date.clone(),
+                    bekanntgabe: e.zz_announcement_date.clone(),
+                    wiederholung: Some(e.zz_procedure_reason.clone()).filter(|r| !r.is_empty()),
+                    akad_period: e.session.clone(),
+                    internal_metadata: None,
+                })
+                .collect();
+
+            // a module that is not graded itself shows the result of its exam
+            let grade = match module.grade().as_str() {
+                "?" => exams.iter().map(|e| e.grade()).find(|g| g != "?").unwrap_or_else(|| "?".to_string()),
+                g => g.to_string(),
+            };
+
+            CampusDualGrade {
+                name: module.course_name.clone(),
+                grade,
+                total_passed: module.passed().or_else(|| exams.iter().find_map(|e| e.passed())),
+                credit_points: module.credits.trim().replace(',', ".").parse::<f64>().map(|f| f as i32).unwrap_or_default(),
+                akad_period: module.session.clone(),
+                subgrades,
+            }
+        })
+        .collect()
 }

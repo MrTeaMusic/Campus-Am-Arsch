@@ -13,7 +13,7 @@ use crate::{
     },
     color_stuff::hex_to_luminance,
     types::{
-        CampusDualGrade, CampusDualSignupOption, CampusDualVerfahrenOption, CampusLoginData,
+        build_grades, CampusDualGrade, CampusDualSignupOption, CampusDualVerfahrenOption, CampusLoginData,
         CampusReminders, CourseResult, CampusTimeline, CampusTimelineEvent, CdAuthData, CdExamDetails,
         CdExamStats, CdGradeStatEntry, ExamRegistrationMetadata, ExportTimelineEvent,
         ExportTimelineEvents, GradeStatsAllStudents, LoginResponse, ODataList, ResponseError,
@@ -29,18 +29,11 @@ pub async fn get_grades(
     // the service ignores $skip/$top and always returns the same (up to 37) rows
     let page: ODataList<CourseResult> = odata_get(
         &client,
-        "ZPIQ_COURSE_RESULTS_SRV/CourseResultSet?$expand=DetailedAppraisals",
+        "ZPIQ_COURSE_RESULTS_SRV/CourseResultSet?$expand=CourseDetails",
     )
     .await?;
 
-    let mut seen = std::collections::HashSet::new();
-    let grades: Vec<CampusDualGrade> = page
-        .d
-        .results
-        .into_iter()
-        .filter(|r| seen.insert(r.key()))
-        .map(CampusDualGrade::from)
-        .collect();
+    let grades = build_grades(page.d.results);
 
     Ok(Json(grades))
 }
@@ -251,7 +244,7 @@ pub async fn get_ects(
         .d
         .results
         .iter()
-        .filter(|r| r.status_code == "02" && seen.insert(r.key()))
+        .filter(|r| !r.is_exam() && r.status_code == "02" && seen.insert(r.key()))
         .map(|r| r.credits.trim().replace(',', ".").parse::<f64>().unwrap_or_default())
         .sum();
 
@@ -311,7 +304,7 @@ pub async fn get_examstats(
 
     let mut seen = std::collections::HashSet::new();
     let (mut successful, mut unsuccessful, mut booked) = (0, 0, 0);
-    for r in results.d.results.iter().filter(|r| seen.insert(r.key())) {
+    for r in results.d.results.iter().filter(|r| !r.is_exam() && seen.insert(r.key())) {
         match r.status_code.as_str() {
             "02" => successful += 1,
             "03" => unsuccessful += 1,
