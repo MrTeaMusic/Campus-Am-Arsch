@@ -31,15 +31,30 @@ pub fn build_login_client(cookie_store: Arc<CookieStoreMutex>) -> Result<Client>
         .build()?)
 }
 
+/// The old CampusDual logged in with the bare number (`5002851`), the IdP wants `s5002851`
+fn normalize_username(raw: &str) -> String {
+    let user = raw.trim();
+    if !user.is_empty() && user.chars().all(|c| c.is_ascii_digit()) {
+        format!("s{user}")
+    } else {
+        user.to_string()
+    }
+}
+
 pub async fn cdlogin_get_jcookie_and_meta(
     login_data: CampusLoginData,
 ) -> Result<(CdAuthData, UserBasicInfo)> {
+    let display_user = login_data.username.trim().trim_start_matches(['s', 'S']).to_string();
+    let login_data = CampusLoginData {
+        username: normalize_username(&login_data.username),
+        password: login_data.password,
+    };
     let cookie_store = Arc::new(CookieStoreMutex::new(CookieStore::new()));
     let client = build_login_client(cookie_store.clone())?;
 
     saml_login(&client, &login_data).await?;
 
-    let user_basic_info = get_userinfo(&client, &login_data.username).await?;
+    let user_basic_info = get_userinfo(&client, &display_user).await?;
 
     let cd_auth_data = CdAuthData {
         cookie: serialize_cookie_store(&cookie_store)?,
@@ -147,12 +162,27 @@ fn parse_form(doc: &Html, base: &Url, selector: &str) -> Option<(Url, Vec<(Strin
     Some((action, fields))
 }
 
+/// Serializes only the cookies the portal needs for later requests. The IdP cookies are only
+/// required during login, and the JWT travels in a browser cookie, which is capped at 4 KiB
 pub fn serialize_cookie_store(store: &CookieStoreMutex) -> Result<String> {
     let store = store.lock().unwrap();
     let mut buf = Vec::new();
     cookie_store::serde::json::save_incl_expired_and_nonpersistent(&store, &mut buf)
         .map_err(|e| anyhow::anyhow!("cookie store serialisation failed: {e}"))?;
-    Ok(String::from_utf8(buf)?)
+
+    // the store is serialised as a JSON array of cookies
+    let mut cookies: Vec<serde_json::Value> = serde_json::from_slice(&buf)?;
+    // keep the SAP session cookies, drop the one-off SAML relay state cookie (~1 KB)
+    cookies.retain(|c| {
+        let name = c["raw_cookie"]
+            .as_str()
+            .and_then(|raw| raw.split('=').next())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        c["domain"].to_string().contains("campus-dual.de")
+            && (name.starts_with("sap") || name.starts_with("mysap"))
+    });
+    Ok(serde_json::to_string(&cookies)?)
 }
 
 pub fn deserialize_cookie_store(json: &str) -> Result<CookieStore> {
@@ -177,12 +207,35 @@ async fn get_userinfo(client: &Client, username: &str) -> Result<UserBasicInfo> 
 }
 
 #[cfg(test)]
+mod tests {
+    use super::normalize_username;
+
+    #[test]
+    fn username_gets_s_prefix_only_for_bare_numbers() {
+        assert_eq!(normalize_username("5002851"), "s5002851");
+        assert_eq!(normalize_username(" 5002851 "), "s5002851");
+        assert_eq!(normalize_username("s5002851"), "s5002851");
+        assert_eq!(normalize_username("S5002851"), "S5002851");
+        assert_eq!(normalize_username(""), "");
+    }
+}
+
+#[cfg(test)]
 mod live_tests {
     use super::*;
     use crate::campus_backend::req_client_funcs::get_client_with_cd_cookie;
     use serde_json::Value;
 
     fn init_cert() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            // SAFETY: set before any other thread reads the environment in these tests
+            unsafe {
+                std::env::set_var("JWT_SECRET", "testtesttesttest");
+                std::env::set_var("AES_KEY", "0123456789abcdef0123456789abcdef");
+            }
+            crate::constants::set_statics_from_env();
+        });
         let pem = include_bytes!("../GEANT TLS RSA 1.pem");
         let _ = CD_CERT_PEM.set(reqwest::Certificate::from_pem(pem).unwrap());
     }
@@ -204,6 +257,14 @@ mod live_tests {
         let (auth, info) = cdlogin_get_jcookie_and_meta(login).await.unwrap();
         println!("login ok, user info filled: {}", !info.user.is_empty());
         println!("cookie store json bytes: {}", auth.cookie.len());
+        let cookies: Vec<Value> = serde_json::from_str(&auth.cookie).unwrap();
+        for c in &cookies {
+            let raw = c["raw_cookie"].as_str().unwrap_or("");
+            let name = raw.split('=').next().unwrap_or("?");
+            println!("  cookie {name:.40}: {} bytes, domain {}", c.to_string().len(), c["domain"]);
+        }
+        let jwt_len = crate::auth::encode_jwt(auth.clone()).unwrap().len();
+        println!("jwt bytes: {jwt_len} (browser cookie limit is 4096)");
 
         // roundtrip: rebuild the client purely from the serialized cookies
         let client = get_client_with_cd_cookie(false, auth.cookie).unwrap();
