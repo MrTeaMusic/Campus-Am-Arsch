@@ -6,17 +6,18 @@ use std::hash::{Hash, Hasher};
 
 use crate::{
     auth::sign_in,
+    campus_backend::login::CD_BASE,
     campus_backend::req_client_funcs::{
-        extract_exam_signup_options, extract_exam_verfahren_options, extract_grades,
+        extract_exam_signup_options, extract_exam_verfahren_options,
         get_client_default, get_client_with_cd_cookie,
     },
     color_stuff::hex_to_luminance,
     types::{
         CampusDualGrade, CampusDualSignupOption, CampusDualVerfahrenOption, CampusLoginData,
-        CampusReminders, CampusTimeline, CampusTimelineEvent, CdAuthData, CdExamDetails,
+        CampusReminders, CourseResult, CampusTimeline, CampusTimelineEvent, CdAuthData, CdExamDetails,
         CdExamStats, CdGradeStatEntry, ExamRegistrationMetadata, ExportTimelineEvent,
-        ExportTimelineEvents, GradeStatsAllStudents, LoginResponse, ResponseError, StundenplanItem,
-        SubGradeMetadata,
+        ExportTimelineEvents, GradeStatsAllStudents, LoginResponse, ODataList, ResponseError,
+        StundenplanItem, SubGradeMetadata, TimetableEvent,
     },
 };
 
@@ -25,15 +26,21 @@ pub async fn get_grades(
 ) -> Result<Json<Vec<CampusDualGrade>>, ResponseError> {
     let client = get_client_with_cd_cookie(true, cd_auth_data.cookie)?;
 
-    let grade_html = client
-        .get("https://selfservice.campus-dual.de/acwork/index")
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    // the service ignores $skip/$top and always returns the same (up to 37) rows
+    let page: ODataList<CourseResult> = odata_get(
+        &client,
+        "ZPIQ_COURSE_RESULTS_SRV/CourseResultSet?$expand=DetailedAppraisals",
+    )
+    .await?;
 
-    let grades = extract_grades(grade_html)?;
+    let mut seen = std::collections::HashSet::new();
+    let grades: Vec<CampusDualGrade> = page
+        .d
+        .results
+        .into_iter()
+        .filter(|r| seen.insert(r.key()))
+        .map(CampusDualGrade::from)
+        .collect();
 
     Ok(Json(grades))
 }
@@ -79,35 +86,40 @@ pub async fn check_revive_session(
     let client = get_client_with_cd_cookie(false, cd_auth_data.cookie)?;
 
     let resp = client
-        .get("https://erp.campus-dual.de/sap/bc/webdynpro/sap/zba_initss?sap-client=100&sap-language=de&uri=https://selfservice.campus-dual.de/index/login")
+        .get(format!(
+            "{CD_BASE}/sap/opu/odata/sap/ZCM_EM_STUDENT_TIMETABLE_SRV/EventListSet/$count?sap-client=100"
+        ))
         .send()
         .await?;
 
-    match resp.status().as_u16() {
-        // 200 means the old session is not alive anymore
-        200 => {
-            let new_login_response = sign_in(Json(CampusLoginData {
-                username: cd_auth_data.user,
-                password: cd_auth_data.password,
-            }))
-            .await;
-
-            log::info!("CaDu auth revive ok?={}", new_login_response.is_ok());
-
-            match new_login_response {
-                Ok(Json(login_response)) => Ok(Json(Some(login_response))),
-                Err(_) => Err(ResponseError {
-                    message: "Failed to log in to CaDu - did the password change?".to_string(),
-                    status_code: StatusCode::UNAUTHORIZED,
-                }),
-            }
-        }
-        500 => Ok(Json(None)),
-        _ => Err(ResponseError {
-            message: "CD healthcheck failed".to_string(),
-            status_code: resp.status(),
-        }),
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(Json(None)); // session still alive
     }
+
+    // An expired session redirects to the IdP (3xx) or is rejected (401/403)
+    if status.is_redirection() || matches!(status.as_u16(), 401 | 403) {
+        let new_login_response = sign_in(Json(CampusLoginData {
+            username: cd_auth_data.user,
+            password: cd_auth_data.password,
+        }))
+        .await;
+
+        log::info!("CaDu auth revive ok?={}", new_login_response.is_ok());
+
+        return match new_login_response {
+            Ok(Json(login_response)) => Ok(Json(Some(login_response))),
+            Err(_) => Err(ResponseError {
+                message: "Failed to log in to CaDu - did the password change?".to_string(),
+                status_code: StatusCode::UNAUTHORIZED,
+            }),
+        };
+    }
+
+    Err(ResponseError {
+        message: "CD healthcheck failed".to_string(),
+        status_code: status,
+    })
 }
 
 pub async fn get_examsignup(
@@ -222,49 +234,70 @@ pub async fn get_examverfahren(
     Ok(Json(signup_verfahren))
 }
 
+/// Achieved ECTS: sum of the credits of all successfully completed modules
 pub async fn get_ects(
     Extension(cd_authdata): Extension<CdAuthData>,
 ) -> Result<String, ResponseError> {
-    let client = get_client_default(true)?;
+    let client = get_client_with_cd_cookie(true, cd_authdata.cookie)?;
 
-    let user = cd_authdata.user;
-    let hash = cd_authdata.hash;
+    let results: ODataList<CourseResult> = odata_get(
+        &client,
+        "ZPIQ_COURSE_RESULTS_SRV/CourseResultSet",
+    )
+    .await?;
 
-    let resp = client
-        .get(format!(
-            "https://selfservice.campus-dual.de/dash/getcp?user={user}&hash={hash}"
-        ))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    Ok(resp)
+    let mut seen = std::collections::HashSet::new();
+    let ects: f64 = results
+        .d
+        .results
+        .iter()
+        .filter(|r| r.status_code == "02" && seen.insert(r.key()))
+        .map(|r| r.credits.trim().replace(',', ".").parse::<f64>().unwrap_or_default())
+        .sum();
+
+    Ok((ects as i64).to_string())
 }
 
 pub async fn get_fachsem(
     Extension(cd_authdata): Extension<CdAuthData>,
 ) -> Result<String, ResponseError> {
-    let client = get_client_default(true)?;
+    let client = get_client_with_cd_cookie(true, cd_authdata.cookie)?;
 
-    let user = cd_authdata.user;
-    let hash = cd_authdata.hash;
+    let audit: serde_json::Value = odata_get(
+        &client,
+        "ZPIQ_DEGREE_AUDIT_SRV/AuditHeaderSet(ProgramOfStudyId='')",
+    )
+    .await?;
 
-    let resp = client
-        .get(format!(
-            "https://selfservice.campus-dual.de/dash/getfs?user={user}&hash={hash}"
-        ))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-
-    // Remove the quotes from the string, parse number
-    let whyisthisnecessary = resp.replace('"', "");
-    let number = whyisthisnecessary.trim().parse::<u32>().unwrap_or(1);
+    // "3.00" -> 3
+    let number = audit["d"]["CurrentSemester"]
+        .as_str()
+        .and_then(|s| s.trim().replace(',', ".").parse::<f64>().ok())
+        .map(|f| f as u32)
+        .unwrap_or(1);
 
     Ok(number.to_string())
+}
+
+/// GET a JSON OData resource below /sap/opu/odata/sap/ with the stored session
+async fn odata_get<T: serde::de::DeserializeOwned>(
+    client: &reqwest_middleware::ClientWithMiddleware,
+    path: &str,
+) -> Result<T, ResponseError> {
+    let resp = client
+        .get(format!("{CD_BASE}/sap/opu/odata/sap/{path}"))
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+
+    if resp.status().is_redirection() {
+        return Err(ResponseError {
+            message: "CampusDual session expired".to_string(),
+            status_code: StatusCode::UNAUTHORIZED,
+        });
+    }
+
+    Ok(resp.error_for_status()?.json().await?)
 }
 
 pub async fn get_examstats(
@@ -291,24 +324,37 @@ pub async fn get_examstats(
 pub async fn get_stundenplan(
     Extension(cd_authdata): Extension<CdAuthData>,
 ) -> Result<Json<Vec<StundenplanItem>>, ResponseError> {
-    let client = get_client_default(true)?;
+    let client = get_client_with_cd_cookie(true, cd_authdata.cookie)?;
 
-    let user = cd_authdata.user;
-    let hash = cd_authdata.hash;
-
-    let mut stundenplan: Vec<StundenplanItem> = client
+    let resp = client
         .get(format!(
-            "https://selfservice.campus-dual.de/room/json?userid={user}&hash={hash}&start=1720735200&end=1720821600"
+            "{CD_BASE}/sap/opu/odata/sap/ZCM_EM_STUDENT_TIMETABLE_SRV/EventListSet?sap-client=100&$skip=0&$top=5000"
         ))
+        .header("Accept", "application/json")
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
 
+    if resp.status().is_redirection() {
+        return Err(ResponseError {
+            message: "CampusDual session expired".to_string(),
+            status_code: StatusCode::UNAUTHORIZED,
+        });
+    }
+
+    let events: ODataList<TimetableEvent> = resp.error_for_status()?.json().await?;
+
+    let mut stundenplan: Vec<StundenplanItem> = events
+        .d
+        .results
+        .into_iter()
+        .filter_map(|ev| {
+            let start = odata_local_date_to_epoch_ms(&ev.start)?;
+            let end = odata_local_date_to_epoch_ms(&ev.end)?;
+            Some(StundenplanItem::from_event(ev, start, end))
+        })
+        .collect();
+
     for item in &mut stundenplan {
-        item.start *= 1000;
-        item.end *= 1000;
         item.color = match item.color.as_str() {
             "darkred" => "#D41610".to_string(),
             _ => string_to_rgb(&format!("0{}0", item.title)),
@@ -324,6 +370,14 @@ pub async fn get_stundenplan(
     }
 
     Ok(Json(stundenplan))
+}
+
+/// SAP sends `/Date(ms)/` where the ms are the *local* Berlin wall clock time as if it were UTC
+fn odata_local_date_to_epoch_ms(raw: &str) -> Option<i64> {
+    let ms: i64 = raw.strip_prefix("/Date(")?.strip_suffix(")/")?.parse().ok()?;
+    let naive = chrono::DateTime::from_timestamp_millis(ms)?.naive_utc();
+    let local = naive.and_local_timezone(chrono_tz::Europe::Berlin).earliest()?;
+    Some(local.timestamp_millis())
 }
 
 fn string_to_rgb(input: &str) -> String {
@@ -424,4 +478,12 @@ fn campusdate_to_iso8601(input: Option<&String>) -> String {
         .and_then(|input| DateTime::parse_from_str(input, format).ok())
         .map(|parsed| parsed.to_rfc3339())
         .unwrap_or("o. D.".to_string())
+}
+
+/// Endpoints that still depend on the pre-V2 CampusDual pages
+pub async fn not_supported_in_v2() -> ResponseError {
+    ResponseError {
+        message: "Diese Funktion ist mit CampusDual V2 noch nicht verfügbar".to_string(),
+        status_code: StatusCode::NOT_IMPLEMENTED,
+    }
 }

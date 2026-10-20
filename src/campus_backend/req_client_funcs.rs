@@ -2,16 +2,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use cookie_store::CookieStore;
 use lazy_static::lazy_static;
 use regex::Regex;
-use reqwest::Url;
 use reqwest_cookie_store::CookieStoreMutex;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use scraper::{Html, Selector, selectable::Selectable};
 
 use crate::{
+    campus_backend::login::deserialize_cookie_store,
     constants::CD_CERT_PEM,
     types::{
         CampusDualGrade, CampusDualSignupOption, CampusDualSubGrade, CampusDualVerfahrenOption,
@@ -33,21 +32,19 @@ pub fn get_client_default(retry: bool) -> Result<ClientWithMiddleware> {
     .build())
 }
 
-pub fn get_client_with_cd_cookie(retry: bool, j_cookie: String) -> Result<ClientWithMiddleware> {
+/// Client carrying the whole serialized session (SAP session cookies).
+/// Redirects are not followed: an expired session redirects to the IdP login page.
+pub fn get_client_with_cd_cookie(retry: bool, cookies_json: String) -> Result<ClientWithMiddleware> {
     let retries = if retry { 2 } else { 0 };
 
-    let cookie: cookie_store::Cookie = serde_json::from_str(&j_cookie)?;
-    let cookie_store = Arc::new(CookieStoreMutex::new(CookieStore::new()));
-    {
-        let mut store = cookie_store.lock().unwrap();
-        store.insert(cookie, &Url::parse("https://campus-dual.de")?)?;
-    }
+    let cookie_store = Arc::new(CookieStoreMutex::new(deserialize_cookie_store(&cookies_json)?));
 
     let retry_policy = ExponentialBackoff::builder().build_with_max_retries(retries);
     Ok(ClientBuilder::new(
         reqwest::Client::builder()
             .add_root_certificate(CD_CERT_PEM.get().unwrap().clone())
             .cookie_provider(cookie_store)
+            .redirect(reqwest::redirect::Policy::none())
             .use_rustls_tls()
             .build()?,
     )

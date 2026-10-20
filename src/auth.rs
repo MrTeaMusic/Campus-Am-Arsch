@@ -11,7 +11,10 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{Header, TokenData, Validation, decode, encode};
 use serde_json::json;
 
-use crate::{campus_backend::login::cdlogin_get_jcookie_and_meta, types::LoginResponse};
+use crate::{
+    campus_backend::login::{InvalidCredentials, cdlogin_get_jcookie_and_meta},
+    types::LoginResponse,
+};
 use crate::{
     constants::{JWT_DEC_KEY, JWT_ENC_KEY},
     encryption::{decrypt, encrypt},
@@ -141,8 +144,13 @@ pub async fn sign_in(
     // Attempt CD login
     let (cd_auth_data, user_basic_info) = match cdlogin_get_jcookie_and_meta(login_data).await {
         Ok((cd_auth_data, user_basic_info)) => (cd_auth_data, user_basic_info),
-        Err(_) => {
-            return Err(StatusCode::UNAUTHORIZED); // CD login failed
+        Err(e) => {
+            log::error!("CD login failed: {e:?}");
+            return Err(if e.downcast_ref::<InvalidCredentials>().is_some() {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::BAD_GATEWAY // CampusDual/IdP changed or is unreachable
+            });
         }
     };
 

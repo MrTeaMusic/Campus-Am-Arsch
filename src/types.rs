@@ -156,6 +156,49 @@ pub struct StundenplanItem {
     pub title: String,
 }
 
+/// One row of ZCM_EM_STUDENT_TIMETABLE_SRV/EventListSet
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct TimetableEvent {
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub event_title: String,
+    #[serde(default)]
+    pub event_description: String,
+    #[serde(default)]
+    pub lecturer_name: String,
+    #[serde(default)]
+    pub room: String,
+    #[serde(default)]
+    pub remarks: String,
+    #[serde(default)]
+    pub otype: String,
+    #[serde(default)]
+    pub exam_short: String,
+}
+
+impl StundenplanItem {
+    pub fn from_event(ev: TimetableEvent, start: i64, end: i64) -> Self {
+        let is_exam = !ev.exam_short.is_empty() || ev.otype != "E";
+        StundenplanItem {
+            all_day: false,
+            color: if is_exam { "darkred".to_string() } else { String::new() },
+            font_color: None,
+            description: ev.event_description,
+            editable: false,
+            end,
+            instructor: ev.lecturer_name.clone(),
+            remarks: ev.remarks,
+            room: ev.room.clone(),
+            sinstructor: ev.lecturer_name,
+            sroom: ev.room,
+            start,
+            title: ev.event_title,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct LatestReminder {
     #[serde(rename(deserialize = "ACAD_SESSION"))]
@@ -358,6 +401,107 @@ impl<'a> From<&'a mut scraper::element_ref::Select<'a, 'a>> for GradeResultsTabl
             bekanntgabe_el: iter.next(),
             wiederholung_el: iter.next(),
             akad_period_el: iter.next(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ODataList<T> {
+    pub d: ODataResults<T>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ODataResults<T> {
+    pub results: Vec<T>,
+}
+
+/// ZPIQ_COURSE_RESULTS_SRV/CourseResultSet (one module incl. expanded DetailedAppraisals)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct CourseResult {
+    #[serde(default, rename = "CourseID")]
+    pub course_id: String,
+    #[serde(default, rename = "AcadYearID")]
+    pub acad_year_id: String,
+    #[serde(default, rename = "SessionID")]
+    pub session_id: String,
+    #[serde(default, rename = "ProgramOfStudyID")]
+    pub program_of_study_id: String,
+    #[serde(default)]
+    pub program_type: String,
+    #[serde(default)]
+    pub course_name: String,
+    #[serde(default)]
+    pub grade_value: String,
+    #[serde(default)]
+    pub status_code: String,
+    #[serde(default)]
+    pub credits: String,
+    #[serde(default)]
+    pub session: String,
+    #[serde(default)]
+    pub zz_announcement_date: String,
+    #[serde(default)]
+    pub zz_assessment_date: String,
+    #[serde(default)]
+    pub zz_procedure_reason: String,
+    /// A list when requested via $expand, otherwise a `__deferred` link object
+    #[serde(default)]
+    pub detailed_appraisals: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Appraisal {
+    #[serde(default)]
+    pub appraisal_type: String,
+    #[serde(default)]
+    pub student_mark: String,
+}
+
+impl CourseResult {
+    /// Identity of a result row, used to drop rows the paged service repeats
+    pub fn key(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.course_id, self.acad_year_id, self.session_id, self.program_of_study_id, self.program_type
+        )
+    }
+}
+
+impl From<CourseResult> for CampusDualGrade {
+    fn from(c: CourseResult) -> Self {
+        // 01 = booked, 02 = passed, 03 = failed
+        let total_passed = match c.status_code.as_str() {
+            "02" => Some(true),
+            "03" => Some(false),
+            _ => None,
+        };
+        let wiederholung = Some(c.zz_procedure_reason.clone()).filter(|r| !r.is_empty());
+
+        let subgrades = serde_json::from_value::<ODataResults<Appraisal>>(c.detailed_appraisals)
+            .map(|a| a.results)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| CampusDualSubGrade {
+                name: a.appraisal_type,
+                grade: a.student_mark,
+                passed: total_passed,
+                beurteilung: c.zz_assessment_date.clone(),
+                bekanntgabe: c.zz_announcement_date.clone(),
+                wiederholung: wiederholung.clone(),
+                akad_period: c.session.clone(),
+                internal_metadata: None,
+            })
+            .collect();
+
+        CampusDualGrade {
+            name: c.course_name,
+            grade: if c.grade_value.is_empty() { "?".to_string() } else { c.grade_value },
+            total_passed,
+            credit_points: c.credits.trim().replace(',', ".").parse::<f64>().map(|f| f as i32).unwrap_or_default(),
+            akad_period: c.session,
+            subgrades,
         }
     }
 }
