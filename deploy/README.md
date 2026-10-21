@@ -1,5 +1,8 @@
 # Selbst betreiben (Oracle Cloud „Always Free“)
 
+> **Einfacher und ohne Server:** [blitz.cloud](blitz/README.md) (kostenlos, ein Container).
+> Diese Anleitung hier beschreibt den Weg über einen eigenen Server bei Oracle.
+
 Diese Anleitung bringt CampusUnbloat (Frontend, Campus-API, Mensa-API) auf einen kostenlosen
 Oracle-Server. Alles wird dort aus GitHub gebaut, es braucht keine Container-Registry und keine
 Zugangsdaten außer deinen eigenen. Danach öffnen Android- und iOS-Nutzer die Adresse im Browser
