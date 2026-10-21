@@ -55,10 +55,11 @@ Die Campus-API (8080) und die Mensa-API (9090) sind nur intern erreichbar.
 
 ## Aktualisieren
 
-Bei jedem Push auf `main` des Backend-Repos baut blitz.cloud neu. Das Dockerfile holt dabei auch
-den jeweils neuesten Stand des Frontends und der Mensa-API aus GitHub. Ein Push ins
-Frontend-Repo allein löst keinen Bau aus. Dann im Tab **Settings** der App auf
-**Get the newest code** klicken.
+Bei jedem Push auf `main` des Backend-Repos baut blitz.cloud neu. Das Frontend wird dabei in dem
+Stand gebaut, der in `deploy/blitz/frontend-ref.txt` steht (ein Commit-Hash des Frontend-Repos). Nach
+einer Änderung im Frontend den neuen Hash dort eintragen (`git rev-parse origin/main` im
+Frontend-Repo) und im Backend-Repo pushen. Das löst den Bau aus und zwingt den Docker-Cache, das
+Frontend neu zu holen. Die Mensa-API wird weiter in ihrem jeweils neuesten Stand geholt.
 
 ## Grenzen des kostenlosen Tarifs
 
