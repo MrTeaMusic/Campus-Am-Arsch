@@ -19,8 +19,11 @@ RUN cargo build --release
 FROM node:22-bookworm-slim AS build-frontend
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
-ADD https://api.github.com/repos/MrTeaMusic/Campus-Unbloat-Frontend/git/refs/heads/main /tmp/fe-ref.json
-RUN git clone --depth 1 https://github.com/MrTeaMusic/Campus-Unbloat-Frontend.git /app
+# Der Frontend-Stand steht in frontend-ref.txt. Ändert sich die Datei, baut der Docker-Cache dieses
+# Stufe neu, auch wenn der Builder die ADD-Prüfung auf Remote-URLs nicht wiederholt.
+COPY deploy/blitz/frontend-ref.txt /tmp/frontend-ref
+RUN git clone https://github.com/MrTeaMusic/Campus-Am-Arsch-Frontend.git /app \
+  && git -C /app checkout "$(cat /tmp/frontend-ref)"
 WORKDIR /app
 RUN npm ci && npm run build && npm prune --omit-dev
 
