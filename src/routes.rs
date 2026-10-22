@@ -15,6 +15,7 @@ use crate::{
         LOGIN_RATELIMIT_QUOTA, LOGIN_RATELIMIT_RESTORE_INTERVAL_SEC, RATELIMIT_QUOTA,
         RATELIMIT_RESTORE_INTERVAL_SEC,
     },
+    push,
     ratelimit_keyextractor::{GovIpOrGlobalExtractorHashed, GovJwtExtractorHashed},
     services, shared_calendar,
 };
@@ -85,6 +86,9 @@ pub async fn app() -> Router {
         .route("/get_board_posts", get(board::list_posts))
         .route("/add_board_post", post(board::add_post))
         .route("/delete_board_post", post(board::delete_post))
+        .route("/get_push_key", get(push::get_key))
+        .route("/subscribe_push", post(push::subscribe))
+        .route("/unsubscribe_push", post(push::unsubscribe))
         // apply auth and jwt rate limiting to all previous (jwt is only stored as hash)
         .layer(GovernorLayer::new(governor_conf_jwt))
         .layer(middleware::from_fn(auth::authorize))
