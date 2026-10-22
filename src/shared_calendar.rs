@@ -1,4 +1,5 @@
 //! Gemeinsamer Kalender: Einträge, die alle App-Nutzer sehen und anlegen können.
+//! Hier liegt auch die Datenbank des Schwarzen Bretts (`board.rs`).
 //! Gespeichert in einer SQLite-Datei (`SHARED_DB_PATH`, Standard `shared_calendar.db` im
 //! Arbeitsverzeichnis, bei blitz.cloud `/app/data`).
 
@@ -17,7 +18,7 @@ const MAX_ENTRIES_PER_USER: i64 = 50;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
-fn db() -> Result<std::sync::MutexGuard<'static, Connection>, ResponseError> {
+pub fn db() -> Result<std::sync::MutexGuard<'static, Connection>, ResponseError> {
     let conn = DB.get_or_init(|| {
         let path = std::env::var("SHARED_DB_PATH").unwrap_or("shared_calendar.db".into());
         let conn = Connection::open(&path).expect("Unable to open the shared calendar database");
@@ -30,6 +31,13 @@ fn db() -> Result<std::sync::MutexGuard<'static, Connection>, ResponseError> {
                 end TEXT NOT NULL,
                 author TEXT NOT NULL,
                 owner TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS board_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL,
+                author TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                created_at TEXT NOT NULL
             );",
         )
         .expect("Unable to create the shared calendar table");
@@ -39,7 +47,7 @@ fn db() -> Result<std::sync::MutexGuard<'static, Connection>, ResponseError> {
     conn.lock().map_err(|_| internal("database lock poisoned"))
 }
 
-fn internal(e: impl std::fmt::Display) -> ResponseError {
+pub fn internal(e: impl std::fmt::Display) -> ResponseError {
     log::error!("Shared calendar: {e}");
     ResponseError {
         message: "Gemeinsamer Kalender nicht verfügbar".to_string(),
@@ -47,7 +55,7 @@ fn internal(e: impl std::fmt::Display) -> ResponseError {
     }
 }
 
-fn bad_request(message: &str) -> ResponseError {
+pub fn bad_request(message: &str) -> ResponseError {
     ResponseError {
         message: message.to_string(),
         status_code: StatusCode::BAD_REQUEST,
@@ -230,7 +238,7 @@ pub async fn delete_event(
 }
 
 /// Fremde Einträge verhalten sich wie nicht vorhandene
-fn not_found_unless(changed: usize) -> Result<StatusCode, ResponseError> {
+pub fn not_found_unless(changed: usize) -> Result<StatusCode, ResponseError> {
     if changed == 0 {
         Err(ResponseError {
             message: "Eintrag nicht gefunden oder nicht von dir".to_string(),

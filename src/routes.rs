@@ -10,7 +10,7 @@ use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
-    auth,
+    auth, board,
     constants::{
         LOGIN_RATELIMIT_QUOTA, LOGIN_RATELIMIT_RESTORE_INTERVAL_SEC, RATELIMIT_QUOTA,
         RATELIMIT_RESTORE_INTERVAL_SEC,
@@ -82,6 +82,9 @@ pub async fn app() -> Router {
         .route("/add_shared_event", post(shared_calendar::add_event))
         .route("/update_shared_event", post(shared_calendar::update_event))
         .route("/delete_shared_event", post(shared_calendar::delete_event))
+        .route("/get_board_posts", get(board::list_posts))
+        .route("/add_board_post", post(board::add_post))
+        .route("/delete_board_post", post(board::delete_post))
         // apply auth and jwt rate limiting to all previous (jwt is only stored as hash)
         .layer(GovernorLayer::new(governor_conf_jwt))
         .layer(middleware::from_fn(auth::authorize))
