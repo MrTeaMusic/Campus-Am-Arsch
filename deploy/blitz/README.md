@@ -70,6 +70,13 @@ Frontend neu zu holen. Die Mensa-API wird weiter in ihrem jeweils neuesten Stand
 - Ein Bau nach dem anderen, Pushes kurz hintereinander werden zusammengefasst.
 - Die Plattform ist jung. Prüfe ihre aktuellen Bedingungen.
 
+## Gemeinsamer Kalender (Speicher)
+
+Die Einträge liegen in der SQLite-Datei `shared_calendar.db` im Arbeitsverzeichnis `/app/data`
+(anderer Ort: Umgebungsvariable `SHARED_DB_PATH`). Damit sie ein Update überleben, muss der Ordner
+`/app/data` unter Einstellungen → Dateien als zu behaltender Ordner eingetragen sein. Im
+kostenlosen Tarif gibt es dafür kein automatisches Backup.
+
 ## Wenn etwas nicht klappt
 
 - **Build scheitert:** Das Build-Log in der Übersicht der App oder im Tab Activity lesen.

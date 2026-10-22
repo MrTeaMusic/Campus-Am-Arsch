@@ -16,7 +16,7 @@ use crate::{
         RATELIMIT_RESTORE_INTERVAL_SEC,
     },
     ratelimit_keyextractor::{GovIpOrGlobalExtractorHashed, GovJwtExtractorHashed},
-    services,
+    services, shared_calendar,
 };
 
 pub async fn app() -> Router {
@@ -78,6 +78,10 @@ pub async fn app() -> Router {
         .route("/get_stundenplan", get(services::get_stundenplan))
         .route("/get_reminders", get(services::not_supported_in_v2))
         .route("/get_timeline", get(services::not_supported_in_v2))
+        .route("/get_shared_events", get(shared_calendar::list_events))
+        .route("/add_shared_event", post(shared_calendar::add_event))
+        .route("/update_shared_event", post(shared_calendar::update_event))
+        .route("/delete_shared_event", post(shared_calendar::delete_event))
         // apply auth and jwt rate limiting to all previous (jwt is only stored as hash)
         .layer(GovernorLayer::new(governor_conf_jwt))
         .layer(middleware::from_fn(auth::authorize))
