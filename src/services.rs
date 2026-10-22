@@ -16,7 +16,7 @@ use crate::{
         build_grades, CampusDualGrade, CampusDualSignupOption, CampusDualVerfahrenOption, CampusLoginData,
         CampusReminders, CourseResult, CampusTimeline, CampusTimelineEvent, CdAuthData, CdExamDetails,
         CdExamStats, CdGradeStatEntry, ExamRegistrationMetadata, ExportTimelineEvent,
-        ExportTimelineEvents, GradeStatsAllStudents, LoginResponse, ExamPeriod, ExamRegistration, ODataList, ResponseError,
+        ExamRegPeriodStatus, ExamRegStatus, ExportTimelineEvents, GradeStatsAllStudents, LoginResponse, ExamPeriod, ExamRegistration, ODataList, ResponseError,
         StundenplanItem, SubGradeMetadata, TimetableEvent,
     },
 };
@@ -329,14 +329,14 @@ pub async fn get_examstats(
     }))
 }
 
-async fn count_booked_exam_offers(
+async fn exam_reg_periods(
     client: &reqwest_middleware::ClientWithMiddleware,
-) -> Result<i64, ResponseError> {
+) -> Result<Vec<ExamRegPeriodStatus>, ResponseError> {
     let periods: ODataList<ExamPeriod> =
         odata_get(client, "ZBA_EXAM_REGISTRATION_SRV/PeriodSet?sap-client=100&$skip=0&$top=100")
             .await?;
 
-    let mut booked = 0;
+    let mut out = Vec::new();
     for p in periods.d.results {
         let exams: ODataList<ExamRegistration> = odata_get(
             client,
@@ -346,9 +346,33 @@ async fn count_booked_exam_offers(
             ),
         )
         .await?;
-        booked += exams.d.results.iter().filter(|e| e.registration_state == "B").count() as i64;
+        out.push(ExamRegPeriodStatus {
+            current: p.is_current(),
+            offers: exams.d.results.len(),
+            booked: exams.d.results.iter().filter(|e| e.registration_state == "B").count(),
+            peryr: p.peryr,
+            perid: p.perid,
+        });
     }
-    Ok(booked)
+    Ok(out)
+}
+
+async fn count_booked_exam_offers(
+    client: &reqwest_middleware::ClientWithMiddleware,
+) -> Result<i64, ResponseError> {
+    Ok(exam_reg_periods(client).await?.iter().map(|p| p.booked as i64).sum())
+}
+
+/// Registration is treated as possible when the current period lists exam offers that are not
+/// booked yet. The meaning of the period and offer fields is inferred, so the periods are
+/// returned as well and the frontend shows them
+pub async fn get_examreg_status(
+    Extension(cd_authdata): Extension<CdAuthData>,
+) -> Result<Json<ExamRegStatus>, ResponseError> {
+    let client = get_client_with_cd_cookie(true, cd_authdata.cookie)?;
+    let periods = exam_reg_periods(&client).await?;
+    let open = periods.iter().any(|p| p.current && p.offers > p.booked);
+    Ok(Json(ExamRegStatus { open, periods }))
 }
 
 pub async fn get_stundenplan(
