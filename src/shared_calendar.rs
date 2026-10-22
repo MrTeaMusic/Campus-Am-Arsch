@@ -1,5 +1,6 @@
 //! Gemeinsamer Kalender: Einträge, die alle App-Nutzer sehen und anlegen können.
-//! Hier liegt auch die Datenbank des Schwarzen Bretts (`board.rs`).
+//! Hier liegt auch die Datenbank des Schwarzen Bretts (`board.rs`) und der Push-Anmeldungen
+//! (`push.rs`).
 //! Gespeichert in einer SQLite-Datei (`SHARED_DB_PATH`, Standard `shared_calendar.db` im
 //! Arbeitsverzeichnis, bei blitz.cloud `/app/data`).
 
@@ -8,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use axum::{Extension, Json, extract::Query};
 use chrono::NaiveDateTime;
 use http::StatusCode;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{CdAuthData, ResponseError};
@@ -32,6 +33,14 @@ pub fn db() -> Result<std::sync::MutexGuard<'static, Connection>, ResponseError>
                 author TEXT NOT NULL,
                 owner TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                endpoint TEXT PRIMARY KEY,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                owner TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS push_sent (event_id INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS board_posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT NOT NULL,
@@ -183,7 +192,9 @@ pub async fn add_event(
         )
         .map_err(internal)?;
     if count >= MAX_ENTRIES_PER_USER {
-        return Err(bad_request("Du hast schon zu viele Einträge, lösche zuerst alte"));
+        return Err(bad_request(
+            "Du hast schon zu viele Einträge, lösche zuerst alte",
+        ));
     }
     conn.execute(
         "INSERT INTO shared_events (title, description, start, end, author, owner)
@@ -206,7 +217,16 @@ pub async fn update_event(
     Json(input): Json<UpdateInput>,
 ) -> Result<StatusCode, ResponseError> {
     let event = validate(input.event)?;
-    let changed = db()?
+    let conn = db()?;
+    let old_start: Option<String> = conn
+        .query_row(
+            "SELECT start FROM shared_events WHERE id = ?1 AND owner = ?2",
+            params![input.id, auth.user],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let changed = conn
         .execute(
             "UPDATE shared_events SET title = ?1, description = ?2, start = ?3, end = ?4, author = ?5
              WHERE id = ?6 AND owner = ?7",
@@ -221,6 +241,14 @@ pub async fn update_event(
             ],
         )
         .map_err(internal)?;
+    // a moved entry gets its reminder again
+    if old_start.is_some_and(|old| old != event.start) {
+        conn.execute(
+            "DELETE FROM push_sent WHERE event_id = ?1",
+            params![input.id],
+        )
+        .map_err(internal)?;
+    }
     not_found_unless(changed)
 }
 
@@ -228,12 +256,20 @@ pub async fn delete_event(
     Extension(auth): Extension<CdAuthData>,
     Json(input): Json<DeleteInput>,
 ) -> Result<StatusCode, ResponseError> {
-    let changed = db()?
+    let conn = db()?;
+    let changed = conn
         .execute(
             "DELETE FROM shared_events WHERE id = ?1 AND owner = ?2",
             params![input.id, auth.user],
         )
         .map_err(internal)?;
+    if changed > 0 {
+        conn.execute(
+            "DELETE FROM push_sent WHERE event_id = ?1",
+            params![input.id],
+        )
+        .map_err(internal)?;
+    }
     not_found_unless(changed)
 }
 
@@ -276,25 +312,50 @@ mod tests {
     async fn only_the_owner_changes_entries() {
         unsafe { std::env::set_var("SHARED_DB_PATH", ":memory:") };
 
-        let id = add_event(auth("a"), input("Lerngruppe", "2030-01-01T10:00", "2030-01-01T12:00"))
-            .await
-            .ok()
-            .unwrap()
-            .0;
+        let id = add_event(
+            auth("a"),
+            input("Lerngruppe", "2030-01-01T10:00", "2030-01-01T12:00"),
+        )
+        .await
+        .ok()
+        .unwrap()
+        .0;
         assert!(
-            add_event(auth("a"), input("Falsch", "2030-01-02T10:00", "2030-01-01T10:00"))
-                .await
-                .is_err()
+            add_event(
+                auth("a"),
+                input("Falsch", "2030-01-02T10:00", "2030-01-01T10:00")
+            )
+            .await
+            .is_err()
         );
 
-        let query = || Query(ListQuery { from: Some("2029-12-31T00:00".into()) });
+        let query = || {
+            Query(ListQuery {
+                from: Some("2029-12-31T00:00".into()),
+            })
+        };
         let seen_by_b = list_events(auth("b"), query()).await.ok().unwrap().0;
         assert_eq!(seen_by_b.len(), 1);
         assert!(!seen_by_b[0].mine);
         assert!(list_events(auth("a"), query()).await.ok().unwrap().0[0].mine);
 
-        assert!(delete_event(auth("b"), Json(DeleteInput { id })).await.is_err());
-        assert!(delete_event(auth("a"), Json(DeleteInput { id })).await.is_ok());
-        assert!(list_events(auth("b"), query()).await.ok().unwrap().0.is_empty());
+        assert!(
+            delete_event(auth("b"), Json(DeleteInput { id }))
+                .await
+                .is_err()
+        );
+        assert!(
+            delete_event(auth("a"), Json(DeleteInput { id }))
+                .await
+                .is_ok()
+        );
+        assert!(
+            list_events(auth("b"), query())
+                .await
+                .ok()
+                .unwrap()
+                .0
+                .is_empty()
+        );
     }
 }

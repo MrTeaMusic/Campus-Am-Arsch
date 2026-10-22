@@ -31,6 +31,8 @@ log = "0.4.22"
 reqwest-middleware = "0.5.2"
 reqwest-retry = "0.9.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+web-push-native = "0.5.0"
+chrono-tz = "0.10.4"
 
 [profile.release]
 strip = true

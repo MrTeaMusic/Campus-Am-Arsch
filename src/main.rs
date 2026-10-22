@@ -12,6 +12,7 @@ pub mod campus_backend;
 mod color_stuff;
 mod constants;
 mod encryption;
+mod push;
 mod ratelimit_keyextractor;
 mod routes;
 mod services;
@@ -51,6 +52,8 @@ async fn main() {
         .expect("Unable to start the server");
 
     log::info!("Listening on {}", listener.local_addr().unwrap());
+
+    tokio::spawn(push::run_scheduler());
 
     let app = routes::app().await;
 
