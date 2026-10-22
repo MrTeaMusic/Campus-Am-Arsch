@@ -14,6 +14,7 @@ mod encryption;
 mod ratelimit_keyextractor;
 mod routes;
 mod services;
+mod shared_calendar;
 mod types;
 
 #[tokio::main]
