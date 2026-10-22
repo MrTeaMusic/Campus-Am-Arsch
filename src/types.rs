@@ -554,6 +554,22 @@ pub fn build_grades(rows: Vec<CourseResult>) -> Vec<CampusDualGrade> {
 pub struct ExamPeriod {
     pub peryr: String,
     pub perid: String,
+    /// marks the current period; the exact format (flag string or bool) is not documented
+    #[serde(default)]
+    pub current: serde_json::Value,
+}
+
+impl ExamPeriod {
+    pub fn is_current(&self) -> bool {
+        match &self.current {
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::String(s) => {
+                !matches!(s.trim().to_lowercase().as_str(), "" | "false" | "0" | "n" | "no")
+            }
+            serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
+            _ => false,
+        }
+    }
 }
 
 /// ZBA_EXAM_REGISTRATION_SRV/ExamSet. "B" = "Angebot gebucht" (an exam offer is booked)
@@ -562,4 +578,21 @@ pub struct ExamPeriod {
 pub struct ExamRegistration {
     #[serde(default)]
     pub registration_state: String,
+}
+
+/// One exam registration period with how many exam offers it lists and how many are booked
+#[derive(Debug, Serialize)]
+pub struct ExamRegPeriodStatus {
+    pub peryr: String,
+    pub perid: String,
+    pub current: bool,
+    pub offers: usize,
+    pub booked: usize,
+}
+
+/// Whether the student can currently register for an exam, as derived from the exam registration
+#[derive(Debug, Serialize)]
+pub struct ExamRegStatus {
+    pub open: bool,
+    pub periods: Vec<ExamRegPeriodStatus>,
 }
