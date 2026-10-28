@@ -10,7 +10,7 @@ use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
-    auth, board,
+    auth, board, documents,
     constants::{
         LOGIN_RATELIMIT_QUOTA, LOGIN_RATELIMIT_RESTORE_INTERVAL_SEC, RATELIMIT_QUOTA,
         RATELIMIT_RESTORE_INTERVAL_SEC,
@@ -79,6 +79,8 @@ pub async fn app() -> Router {
         .route("/get_stundenplan", get(services::get_stundenplan))
         .route("/get_reminders", get(services::not_supported_in_v2))
         .route("/get_timeline", get(services::not_supported_in_v2))
+        .route("/get_student_documents", get(documents::list_documents))
+        .route("/get_student_document", get(documents::get_document))
         .route("/get_shared_events", get(shared_calendar::list_events))
         .route("/add_shared_event", post(shared_calendar::add_event))
         .route("/update_shared_event", post(shared_calendar::update_event))
