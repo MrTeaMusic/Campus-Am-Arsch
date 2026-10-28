@@ -11,6 +11,7 @@ mod board;
 pub mod campus_backend;
 mod color_stuff;
 mod constants;
+mod documents;
 mod encryption;
 mod push;
 mod ratelimit_keyextractor;
